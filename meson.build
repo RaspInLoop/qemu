@@ -274,6 +274,12 @@ if 'CONFIG_GIO' in config_host
   gio = declare_dependency(compile_args: config_host['GIO_CFLAGS'].split(),
                            link_args: config_host['GIO_LIBS'].split())
 endif
+zmq = not_found
+if 'CONFIG_ZMQ' in config_host
+  
+  zmq = declare_dependency(compile_args: config_host['ZMQ_CFLAGS'].split(),
+                           link_args: config_host['ZMQ_LIBS'].split())
+endif
 lttng = not_found
 if 'CONFIG_TRACE_UST' in config_host
   lttng = declare_dependency(link_args: config_host['LTTNG_UST_LIBS'].split())
@@ -1533,7 +1539,7 @@ util_ss.add_all(trace_ss)
 util_ss = util_ss.apply(config_all, strict: false)
 libqemuutil = static_library('qemuutil',
                              sources: util_ss.sources() + stub_ss.sources() + genh,
-                             dependencies: [util_ss.dependencies(), m, glib, socket, malloc])
+                             dependencies: [util_ss.dependencies(), m, glib, socket, malloc, zmq])
 qemuutil = declare_dependency(link_with: libqemuutil,
                               sources: genh + version_res)
 
@@ -2136,6 +2142,7 @@ summary_info += {'vde support':       config_host.has_key('CONFIG_VDE')}
 summary_info += {'netmap support':    config_host.has_key('CONFIG_NETMAP')}
 summary_info += {'Linux AIO support': config_host.has_key('CONFIG_LINUX_AIO')}
 summary_info += {'Linux io_uring support': config_host.has_key('CONFIG_LINUX_IO_URING')}
+summary_info += {'Linux zmq support': config_host.has_key('CONFIG_ZMQ')}
 summary_info += {'ATTR/XATTR support': config_host.has_key('CONFIG_ATTR')}
 summary_info += {'Install blobs':     get_option('install_blobs')}
 summary_info += {'KVM support':       config_all.has_key('CONFIG_KVM')}

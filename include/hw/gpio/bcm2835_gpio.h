@@ -32,6 +32,9 @@ struct BCM2835GpioState {
     uint32_t lev0, lev1;
     uint8_t sd_fsel;
     qemu_irq out[54];
+    void *zmq_context;
+    void *zmq_publisher;
+    pthread_mutex_t lock_write; 
 };
 
 #define TYPE_BCM2835_GPIO "bcm2835_gpio"

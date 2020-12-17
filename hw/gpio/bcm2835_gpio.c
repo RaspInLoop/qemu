@@ -21,6 +21,13 @@
 #include "hw/sd/sd.h"
 #include "hw/gpio/bcm2835_gpio.h"
 #include "hw/irq.h"
+#include <syslog.h>
+
+#include <zmq.h>
+#include <string.h>
+#include <stdio.h>
+#include <unistd.h>
+#include <assert.h>
 
 #define GPFSEL0   0x00
 #define GPFSEL1   0x04
@@ -51,6 +58,8 @@
 #define GPPUD     0x94
 #define GPPUDCLK0 0x98
 #define GPPUDCLK1 0x9C
+
+static pthread_t zmq_subscriber_thread;
 
 static uint32_t gpfsel_get(BCM2835GpioState *s, uint8_t reg)
 {
@@ -110,9 +119,59 @@ static int gpfsel_is_out(BCM2835GpioState *s, int index)
     return 0;
 }
 
+static void gpset_from_ext(BCM2835GpioState *s, uint8_t index)
+{
+    fprintf(stderr, "msg received: set\n ");
+    // lev may be modified either by the guest and by the host (upon reception of 0MQ message)
+    pthread_mutex_lock(&s->lock_write);
+    uint32_t *lev;
+    uint32_t bit_to_set;
+
+    if (index < 32){
+        lev = &s->lev0;
+        bit_to_set = 1 << index;
+    } else {
+        lev = &s->lev1;
+        bit_to_set = 1 << (index-32);
+    }
+
+    uint32_t changes = bit_to_set & ~*lev;
+    if (changes && (gpfsel_is_out(s, index))) {
+        qemu_set_irq(s->out[index], 1);
+    }
+    *lev |= bit_to_set;
+    pthread_mutex_unlock(&s->lock_write); 
+}
+
+static void gpclr_from_ext(BCM2835GpioState *s, uint8_t index)
+{
+    fprintf(stderr, "msg received: clear\n ");
+    // lev may be modified either by the guest and by the host (upon reception of 0MQ message)
+    pthread_mutex_lock(&s->lock_write);
+    uint32_t *lev;
+    uint32_t bit_to_clear;
+
+    if (index < 32){
+        lev = &s->lev0;
+        bit_to_clear = 1 << index;
+    } else {
+        lev = &s->lev1;
+        bit_to_clear = 1 << (index-32);
+    }
+
+    uint32_t changes = bit_to_clear & *lev;
+    if (changes && (gpfsel_is_out(s, index))) {
+        qemu_set_irq(s->out[index], 0);
+    }
+    *lev &= ~bit_to_clear;
+    pthread_mutex_unlock(&s->lock_write); 
+}
+
 static void gpset(BCM2835GpioState *s,
         uint32_t val, uint8_t start, uint8_t count, uint32_t *lev)
 {
+     // lev may be modified either by the guest and by the host (upon reception of 0MQ message)
+    pthread_mutex_lock(&s->lock_write); 
     uint32_t changes = val & ~*lev;
     uint32_t cur = 1;
 
@@ -120,16 +179,23 @@ static void gpset(BCM2835GpioState *s,
     for (i = 0; i < count; i++) {
         if ((changes & cur) && (gpfsel_is_out(s, start + i))) {
             qemu_set_irq(s->out[start + i], 1);
+            char message[8];
+            sprintf(message, "set %d", start+i);
+            zmq_send (s->zmq_publisher, "gpio", 4, ZMQ_SNDMORE);
+            zmq_send (s->zmq_publisher, message, strlen(message), 0);
         }
         cur <<= 1;
     }
 
     *lev |= val;
+    pthread_mutex_unlock(&s->lock_write); 
 }
 
 static void gpclr(BCM2835GpioState *s,
         uint32_t val, uint8_t start, uint8_t count, uint32_t *lev)
 {
+    // lev may be modified either by the guest and by the host (upon reception of 0MQ message)
+    pthread_mutex_lock(&s->lock_write); 
     uint32_t changes = val & *lev;
     uint32_t cur = 1;
 
@@ -137,11 +203,16 @@ static void gpclr(BCM2835GpioState *s,
     for (i = 0; i < count; i++) {
         if ((changes & cur) && (gpfsel_is_out(s, start + i))) {
             qemu_set_irq(s->out[start + i], 0);
+            char message[10];
+            sprintf(message, "clear %d", start+i);
+            zmq_send (s->zmq_publisher, "gpio", 4, ZMQ_SNDMORE);
+            zmq_send (s->zmq_publisher, message, strlen(message), 0);
         }
         cur <<= 1;
     }
 
     *lev &= ~val;
+    pthread_mutex_unlock(&s->lock_write);
 }
 
 static uint64_t bcm2835_gpio_read(void *opaque, hwaddr offset,
@@ -293,6 +364,35 @@ static const VMStateDescription vmstate_bcm2835_gpio = {
     }
 };
 
+static void *zmq_subscriber_thread_func (void *obj){
+    BCM2835GpioState *s = BCM2835_GPIO(obj);
+    void * zmq_subscriber = zmq_socket (s->zmq_context, ZMQ_SUB);
+    zmq_setsockopt (zmq_subscriber, ZMQ_SUBSCRIBE, "gpio", strlen ("gpio"));
+    int rc = zmq_connect (zmq_subscriber, "tcp://127.0.0.1:5557");
+    if (rc != 0 ) {
+        fprintf(stderr, "rc for zmq_connect: %d, errno:%d\n", rc, errno);        
+    }
+    assert (rc == 0);
+    while (1) {
+        char buffer [9];
+        memset(buffer,'\0', sizeof(buffer));
+        int nbchar = zmq_recv (zmq_subscriber, buffer, 8, 0);
+        if (nbchar > strlen("set") && (strncmp (buffer, "set", strlen("set"))==0)) {
+            char index_str[4];
+            strncpy(index_str, buffer+ strlen("set") + 1, 3);
+            index_str[strlen(index_str)] = 0;
+            uint8_t index = atoi(index_str);
+            gpset_from_ext(s, index);
+        } else if (nbchar > strlen("clear") && (strncmp (buffer, "clear", strlen("clear"))==0)) {
+            char index_str[4];
+            strncpy(index_str, buffer + strlen("clear") + 1, 3);
+            index_str[strlen(index_str)] = 0;
+            uint8_t index = atoi(index_str);
+            gpclr_from_ext(s, index);
+        }
+    }
+}
+
 static void bcm2835_gpio_init(Object *obj)
 {
     BCM2835GpioState *s = BCM2835_GPIO(obj);
@@ -304,8 +404,30 @@ static void bcm2835_gpio_init(Object *obj)
 
     memory_region_init_io(&s->iomem, obj,
             &bcm2835_gpio_ops, s, "bcm2835_gpio", 0x1000);
+    s->zmq_context = zmq_ctx_new();
+    if (pthread_mutex_init(&s->lock_write, NULL) != 0) { 
+        syslog(LOG_ERR, "\n mutex init has failed\n"); 
+    } 
+    // start listening....    
+    int rc = pthread_create(&zmq_subscriber_thread, NULL, zmq_subscriber_thread_func, s);
+    if (rc) {
+        fprintf(stderr,"Fail to create 0MQ subscriber thread (%d)\n", rc);        
+    }
+    s->zmq_publisher = zmq_socket (s->zmq_context, ZMQ_PUB);
+    zmq_connect (s->zmq_publisher, "tcp://localhost:5556");
+
     sysbus_init_mmio(sbd, &s->iomem);
     qdev_init_gpio_out(dev, s->out, 54);
+}
+
+
+
+static void bcm2835_gpio_finalize(Object *obj){
+    BCM2835GpioState *s = BCM2835_GPIO(obj);    
+    pthread_join(zmq_subscriber_thread, NULL);
+    
+    zmq_close (s->zmq_publisher);
+    zmq_ctx_destroy (s->zmq_context);
 }
 
 static void bcm2835_gpio_realize(DeviceState *dev, Error **errp)
@@ -335,6 +457,7 @@ static const TypeInfo bcm2835_gpio_info = {
     .instance_size = sizeof(BCM2835GpioState),
     .instance_init = bcm2835_gpio_init,
     .class_init    = bcm2835_gpio_class_init,
+    .instance_finalize = bcm2835_gpio_finalize,
 };
 
 static void bcm2835_gpio_register_types(void)

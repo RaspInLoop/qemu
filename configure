@@ -318,6 +318,7 @@ xen_ctrl_version=""
 xen_pci_passthrough="auto"
 linux_aio=""
 linux_io_uring=""
+zmq=""
 cap_ng=""
 attr=""
 libattr=""
@@ -1204,6 +1205,10 @@ for opt do
   --disable-linux-io-uring) linux_io_uring="no"
   ;;
   --enable-linux-io-uring) linux_io_uring="yes"
+  ;;
+  --disable-zmq) zmq="no"
+  ;;
+  --enable-zmq) zmq="yes"
   ;;
   --disable-attr) attr="no"
   ;;
@@ -3747,6 +3752,22 @@ if test "$linux_io_uring" != "no" ; then
 fi
 
 ##########################################
+# zmq probe
+
+if test "$zmq" != "no" ; then
+  if $pkg_config libzmq; then
+    zmq_cflags=$($pkg_config --cflags libzmq)
+    zmq_libs=$($pkg_config --libs libzmq)
+    zmq=yes
+  else
+    if test "$zmq" = "yes" ; then
+      feature_not_found "linux zmq" "Install zmq devel"
+    fi
+    zmq=no
+  fi
+fi
+
+##########################################
 # TPM emulation is only on POSIX
 
 if test "$tpm" = ""; then
@@ -6211,6 +6232,11 @@ if test "$linux_io_uring" = "yes" ; then
   echo "CONFIG_LINUX_IO_URING=y" >> $config_host_mak
   echo "LINUX_IO_URING_CFLAGS=$linux_io_uring_cflags" >> $config_host_mak
   echo "LINUX_IO_URING_LIBS=$linux_io_uring_libs" >> $config_host_mak
+fi
+if test "$zmq" = "yes" ; then
+  echo "CONFIG_ZMQ=y" >> $config_host_mak
+  echo "ZMQ_CFLAGS=$zmq_cflags" >> $config_host_mak
+  echo "ZMQ_LIBS=$zmq_libs" >> $config_host_mak
 fi
 if test "$attr" = "yes" ; then
   echo "CONFIG_ATTR=y" >> $config_host_mak
