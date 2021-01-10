@@ -3,7 +3,7 @@ QEMU-RASPINLOOP README
 ===========
 Fork of QEMU for use with raspinloop Project.
 QEMU is a generic and open source machine & userspace emulator and
-virtualizer. This fork exchange raspi3 GPIO state with a backend service named ria-cosimulation-worker ( via ria-proxy-server). 
+virtualizer. This fork exchange raspi3 GPIO states with a backend service named ria-cosimulation-worker ( via emulator-simulator-proxy). 
 
 QEMU as a whole is released under the GNU General Public License,
 version 2. For full licensing details, consult the LICENSE file.
